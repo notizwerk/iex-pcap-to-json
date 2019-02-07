@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"io"
 	"os"
 	"strings"
@@ -12,20 +13,24 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		println("usage:\n .\\iex-pcap-to-json pcpaFileOrDir [destinationDir]")
+		println("usage:\n .\\iex-pcap-to-json [-symbol=AAPL] pcpaFileOrDir [destinationDir]")
 		return
 	}
+	symbolPtr := flag.String("symbol", "", "show only messages for symbol")
+	flag.Parse()
+
 	var destDir string
-	if len(os.Args) > 2 {
-		destDir = os.Args[2]
+	if len(flag.Args()) > 1 {
+		destDir = flag.Args()[1]
 	}
-	fileOrDirectory := os.Args[1]
+	fileOrDirectory := flag.Args()[0]
 	fi, err := os.Lstat(fileOrDirectory)
 	if err != nil {
 		panic(err)
 	}
+
 	if fi.Mode().IsRegular() {
-		convertToJSON(fileOrDirectory, destDir)
+		convertToJSON(fileOrDirectory, destDir, *symbolPtr)
 	} else if fi.Mode().IsDir() {
 		dir, err := os.Open(fileOrDirectory)
 		if err != nil {
@@ -41,14 +46,14 @@ func main() {
 		for index := 0; index < len(names); index++ {
 			if strings.HasSuffix(names[index], "pcap") ||
 				strings.HasSuffix(names[index], "pcap.gz") {
-				convertToJSON(fileOrDirectory+names[index], destDir)
+				convertToJSON(fileOrDirectory+names[index], destDir, *symbolPtr)
 			}
 		}
 	}
 	return
 }
 
-func convertToJSON(pcapFile string, destDir string) {
+func convertToJSON(pcapFile string, destDir string, symbol string) {
 	dat, err := os.Open(pcapFile)
 	if err != nil {
 		panic(err)
@@ -60,6 +65,10 @@ func convertToJSON(pcapFile string, destDir string) {
 		if !strings.HasSuffix(destDir, string(os.PathSeparator)) {
 			destDir = destDir + string(os.PathSeparator)
 		}
+	}
+	if len(symbol) > 0 {
+		fileName = destDir + fileName + "_" + symbol + ".json"
+	} else {
 		fileName = destDir + fileName + ".json"
 	}
 	println("converting file " + pcapFile + " to " + fileName)
@@ -85,11 +94,17 @@ func convertToJSON(pcapFile string, destDir string) {
 
 		switch msg := msg.(type) {
 		case *tops.QuoteUpdateMessage:
-			enc.Encode(msg)
+			if len(symbol) == 0 || msg.Symbol == symbol {
+				enc.Encode(msg)
+			}
 		case *tops.TradeReportMessage:
-			enc.Encode(msg)
+			if len(symbol) == 0 || msg.Symbol == symbol {
+				enc.Encode(msg)
+			}
 		case *tops.OfficialPriceMessage:
-			enc.Encode(msg)
+			if len(symbol) == 0 || msg.Symbol == symbol {
+				enc.Encode(msg)
+			}
 		default:
 		}
 	}
