@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,12 +24,13 @@ func main() {
 		println("for generating an ndjson bulk upload file(s):\n")
 		println("usage:\n .\\iex-pcap-to-json [-symbol=AAPL] [-filter=filter] pcpaFileOrDir [destinationDir]")
 		println("\nor for uploading:\n")
-		println("usage:\n .\\iex-pcap-to-json -url=elasticurl -user=user -pass=pass ndJsonBulkFile")
+		println("usage:\n .\\iex-pcap-to-json -index=indexPrefix -url=elasticurl -user=user -pass=pass ndJsonBulkFile")
 		return
 	}
 	symbolPtr := flag.String("symbol", "", "show only messages for symbol")
 	filterPtr := flag.String("filter", "", "parse only files with match the filter (strings.Index()>-1)")
 	urlPtr := flag.String("url", "", "the url to elastic")
+	indexPrefixPtr := flag.String("index", "", "the prefix of the index. symbol and year will be added")
 	userPtr := flag.String("user", "", "user name for elastic")
 	passPtr := flag.String("pass", "", "password for elastic")
 	flag.Parse()
@@ -41,7 +43,7 @@ func main() {
 
 	if len(*urlPtr) > 0 {
 		if fi.Mode().IsRegular() {
-			upload(*urlPtr, *userPtr, *passPtr, flag.Args()[0])
+			upload(*urlPtr, *userPtr, *passPtr, *indexPrefixPtr, flag.Args()[0])
 		} else if fi.Mode().IsDir() {
 			dir, err := os.Open(fileOrDirectory)
 			if err != nil {
@@ -56,7 +58,7 @@ func main() {
 			}
 			for index := 0; index < len(names); index++ {
 				if strings.HasSuffix(names[index], "ndjson") {
-					upload(*urlPtr, *userPtr, *passPtr, fileOrDirectory+names[index])
+					upload(*urlPtr, *userPtr, *passPtr, *indexPrefixPtr, fileOrDirectory+names[index])
 				}
 			}
 		} else {
@@ -119,14 +121,26 @@ func main() {
 	return
 }
 
-func upload(url string, username string, password string, fileName string) {
+func upload(url string, username string, password string, indexPrefix string, fileName string) {
 	file, err := os.Open(fileName)
 	if err != nil {
 		fmt.Printf("cannot open %v: %v\n", fileName, err)
 		return
 	}
 	payloadReader := bufio.NewReader(file)
+	last := strings.LastIndex(fileName, "_")
+	fileNameShort := fileName[0:last]
+	last = strings.LastIndex(fileNameShort, "_")
+	symbol := fileNameShort[last+1:]
+	symbol = strings.ToLower(symbol)
+	re := regexp.MustCompile("[\\d]{8}")
+	date := re.FindString(fileNameShort)[0:4]
 
+	if !strings.HasSuffix(url, "/") {
+		url = url + "/"
+	}
+	url = url + indexPrefix + "-" + symbol + "-" + date + "/_bulk"
+	fmt.Printf("uploading to %v\n", url)
 	req, err := http.NewRequest("POST", url, payloadReader)
 	if err != nil {
 		fmt.Printf("cannot create request %v\n", err)
@@ -201,8 +215,8 @@ type EnrichedTOPS struct {
 
 // IndexMetaData for generating the bulk meta data part
 type IndexMetaData struct {
-	Index string `json:"_index"`
-	Doc   string `json:"_type"`
+	// Index string `json:"_index"`
+	Doc string `json:"_type"`
 }
 
 // ActionMetaData for generating the bulk meta data part
@@ -267,8 +281,8 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 				}
 				enc := jsonEncoder(pcapFile, destDir, symbol)
 				indexMetaData := IndexMetaData{
-					Index: "tops_" + strings.ToLower(symbol) + "_" + topMessage.Timestamp.Format("200601"),
-					Doc:   "_doc"}
+					// Index: "tops_" + strings.ToLower(symbol) + "_" + topMessage.Timestamp.Format("200601"),
+					Doc: "_doc"}
 				actionMeta := ActionMetaData{Index: indexMetaData}
 				bulkMsgCounter := symbolMetaData.BulkMessageCount
 				symbolMetaData.TotalMessageCount++
