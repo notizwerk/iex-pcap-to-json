@@ -18,8 +18,57 @@ import (
 	"github.com/notizwerk/go-iex/iextp/tops"
 )
 
-func main() {
+var maxBulkSize = 20000
+var defaultSymbols = []string{"AAPL", "AMD", "AMZN", "BABA", "CGC", "FB", "GLD", "GOOGL", "GOOS", "IQ", "JD", "LABU", "M", "MDB", "MU", "NFLX", "NVDA", "QQQ", "ROKU", "SHOP", "SNAP", "SPOT", "SPY", "SQ", "TLRY", "TWLO", "TWTR", "UGAZ", "VXX", "WMT"}
 
+// SymbolMetaData stores some parsing/encoding specific data for a symbol
+type SymbolMetaData struct {
+	BulkCount         int
+	BulkMessageCount  int
+	TotalMessageCount int
+	Encoder           *json.Encoder
+	LastPrice         *tops.TradeReportMessage
+	LastOrderBook     *tops.QuoteUpdateMessage
+}
+
+var symbolMetaDataMap = make(map[string]*SymbolMetaData)
+
+// EnrichedTOPS containing all relevant data in one doc
+type EnrichedTOPS struct {
+	Timestamp time.Time `json:"t"`
+	// Traded symbol represented in Nasdaq integrated symbology.
+	Symbol string `json:"s"`
+	// Size of the last trade, in number of shares.
+	LastSaleSize uint32 `json:"lss"`
+	// Execution price of last sale.
+	LastSalePrice float64 `json:"lsp"`
+	// Timestamp of the last sale
+	LastSaleTimestamp time.Time `json:"lst"`
+	// Size of the quote at the bid, in number of shares.
+	BidSize uint32 `json:"bs"`
+	// Price of the quote at the bid.
+	BidPrice float64 `json:"bp"`
+	// Price of the quote at the ask.
+	AskPrice float64 `json:"ap"`
+	// Size of the quote at the ask, in number of shares.
+	AskSize uint32 `json:"as"`
+}
+
+// IndexMetaData for generating the bulk meta data part
+type IndexMetaData struct {
+	// Index string `json:"_index"`
+	Doc string `json:"_type"`
+}
+
+// ActionMetaData for generating the bulk meta data part
+type ActionMetaData struct {
+	Index IndexMetaData `json:"index"`
+}
+
+// logfile
+var logFile *os.File
+
+func main() {
 	if len(os.Args) < 2 {
 		println("for generating an ndjson bulk upload file(s):\n")
 		println("usage:\n .\\iex-pcap-to-json [-symbol=AAPL] [-filter=filter] pcpaFileOrDir [destinationDir]")
@@ -34,6 +83,13 @@ func main() {
 	userPtr := flag.String("user", "", "user name for elastic")
 	passPtr := flag.String("pass", "", "password for elastic")
 	flag.Parse()
+
+	logfileName := "pcaplog-" + time.Now().Format("20060102") + ".log"
+	l, err := os.OpenFile(logfileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	logFile = l
 
 	fileOrDirectory := flag.Args()[0]
 	fi, err := os.Lstat(fileOrDirectory)
@@ -76,12 +132,10 @@ func main() {
 		symbols = strings.Split(*symbolPtr, ",")
 		for i, s := range symbols {
 			symbols[i] = strings.TrimSpace(s)
-		}
-		for s := range symbols {
-			fmt.Printf("symbol '%v'\n", symbols[s])
+			fmt.Printf("symbol '%v'\n", symbols[i])
 		}
 	} else {
-		symbols = []string{"AAPL", "AMD", "AMZN", "BABA", "CGC", "FB", "GLD", "GOOGL", "GOOS", "IQ", "JD", "LABU", "M", "MDB", "MU", "NFLX", "NVDA", "QQQ", "ROKU", "SHOP", "SNAP", "SPOT", "SPY", "SQ", "TLRY", "TWLO", "TWTR", "UGAZ", "VXX", "WMT"}
+		symbols = defaultSymbols
 	}
 
 	if fi.Mode().IsRegular() {
@@ -115,35 +169,45 @@ func main() {
 		symbolMetaData, found := symbolMetaDataMap[sym]
 		if found {
 			symbolMetaData = symbolMetaDataMap[sym]
-			fmt.Printf("finished %v %v\n", sym, symbolMetaData.TotalMessageCount)
+			l := fmt.Sprintf("finished %v %v\n", sym, symbolMetaData.TotalMessageCount)
+			print(l)
+			logFile.WriteString(l)
 		}
 	}
 	return
 }
 
+var dateRegexp = regexp.MustCompile("[\\d]{8}")
+var errorRegExp = regexp.MustCompile("errors\"\\s*:\\s*true")
+
 func upload(url string, username string, password string, indexPrefix string, fileName string) {
+	var l string
 	file, err := os.Open(fileName)
 	if err != nil {
-		fmt.Printf("cannot open %v: %v\n", fileName, err)
+		l = fmt.Sprintf("cannot open %v: %v\n", fileName, err)
+		print(l)
+		logFile.WriteString(l)
 		return
 	}
 	payloadReader := bufio.NewReader(file)
 	last := strings.LastIndex(fileName, "_")
 	fileNameShort := fileName[0:last]
 	last = strings.LastIndex(fileNameShort, "_")
-	symbol := fileNameShort[last+1:]
-	symbol = strings.ToLower(symbol)
-	re := regexp.MustCompile("[\\d]{8}")
-	date := re.FindString(fileNameShort)[0:4]
+	symbol := strings.ToLower(fileNameShort[last+1:])
+	date := dateRegexp.FindString(fileNameShort)[0:4]
 
 	if !strings.HasSuffix(url, "/") {
 		url = url + "/"
 	}
 	url = url + indexPrefix + "-" + symbol + "-" + date + "/_bulk"
-	fmt.Printf("uploading to %v\n", url)
+	l = fmt.Sprintf("uploading to %v\n", url)
+	print(l)
+	logFile.WriteString(l)
 	req, err := http.NewRequest("POST", url, payloadReader)
 	if err != nil {
-		fmt.Printf("cannot create request %v\n", err)
+		l = fmt.Sprintf("cannot create request %v\n", err)
+		print(l)
+		logFile.WriteString(l)
 		return
 	}
 	req.SetBasicAuth(username, password)
@@ -151,77 +215,46 @@ func upload(url string, username string, password string, indexPrefix string, fi
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Printf("cannot make request %v\n", err)
+		l = fmt.Sprintf("cannot make request %v\n", err)
+		print(l)
+		logFile.WriteString(l)
 		return
 	}
 	defer res.Body.Close()
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		fmt.Printf("cannot read response %v\n", err)
+		l = fmt.Sprintf("cannot read response %v\n", err)
+		print(l)
+		logFile.WriteString(l)
 		return
 	}
-	fmt.Printf("uploaded %v\n", fileName)
-	datOut, err := os.Create(fileName + ".response.json")
-	if err != nil {
-		fmt.Printf("cannot write response to file ")
-		return
+	l = fmt.Sprintf("uploaded %v\n", fileName)
+	print(l)
+	logFile.WriteString(l)
+	responseJSON := string(body)
+	error := errorRegExp.FindString(responseJSON)
+	if len(error) > 0 {
+		responseFileName := fileName + ".error.json"
+		l = fmt.Sprintf("error while uploading. writing response to  " + responseFileName)
+		print(l)
+		logFile.WriteString(l)
+		datOut, err := os.Create(responseFileName)
+		if err != nil {
+			fmt.Printf("cannot write response to file ")
+			return
+		}
+		datOut.Write(body)
+		datOut.Close()
+	} else {
+		responseFileName := fileName + ".response.json"
+		datOut, err := os.Create(responseFileName)
+		if err != nil {
+			fmt.Printf("cannot write response to file ")
+			return
+		}
+		datOut.WriteString("{\"result\":\"uploaded successfully\"}")
+		datOut.Close()
 	}
-	// fmt.Println(res)
-	// fmt.Println(string(body))
-	datOut.Write(body)
-	datOut.Close()
-
-}
-
-var maxBulkSize = 20000
-
-// SymbolMetaData stores some parsing/encoding specific data for a symbol
-type SymbolMetaData struct {
-	BulkCount         int
-	BulkMessageCount  int
-	TotalMessageCount int
-	Encoder           *json.Encoder
-	LastPrice         *tops.TradeReportMessage
-	LastOrderBook     *tops.QuoteUpdateMessage
-}
-
-var symbolMetaDataMap = make(map[string]*SymbolMetaData)
-
-// var symbolCounter = make(map[string]int)
-// var symbolToEncoder = make(map[string]*json.Encoder)
-// var symbolToLastPrice = make(map[string]*tops.TradeReportMessage)
-// var symbolToLastOrderBook = make(map[string]*tops.QuoteUpdateMessage)
-
-// EnrichedTOPS containing all relevant data in one doc
-type EnrichedTOPS struct {
-	Timestamp time.Time `json:"t"`
-	// Traded symbol represented in Nasdaq integrated symbology.
-	Symbol string `json:"s"`
-	// Size of the last trade, in number of shares.
-	LastSaleSize uint32 `json:"lss"`
-	// Execution price of last sale.
-	LastSalePrice float64 `json:"lsp"`
-	// Timestamp of the last sale
-	LastSaleTimestamp time.Time `json:"lst"`
-	// Size of the quote at the bid, in number of shares.
-	BidSize uint32 `json:"bs"`
-	// Price of the quote at the bid.
-	BidPrice float64 `json:"bp"`
-	// Price of the quote at the ask.
-	AskPrice float64 `json:"ap"`
-	// Size of the quote at the ask, in number of shares.
-	AskSize uint32 `json:"as"`
-}
-
-// IndexMetaData for generating the bulk meta data part
-type IndexMetaData struct {
-	// Index string `json:"_index"`
-	Doc string `json:"_type"`
-}
-
-// ActionMetaData for generating the bulk meta data part
-type ActionMetaData struct {
-	Index IndexMetaData `json:"index"`
 }
 
 func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
@@ -314,16 +347,6 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 	}
 }
 
-//Contains tests if string x is in the array a of strings
-func Contains(a []string, x string) bool {
-	for _, n := range a {
-		if x == n {
-			return true
-		}
-	}
-	return false
-}
-
 func jsonEncoder(pcapFile string, destDir string, symbol string) *json.Encoder {
 	symbolMetaData, ok := symbolMetaDataMap[symbol]
 	if !ok {
@@ -349,14 +372,16 @@ func jsonEncoder(pcapFile string, destDir string, symbol string) *json.Encoder {
 	} else {
 		fileName = destDir + fileName + ".ndjson"
 	}
-	println("converting file " + pcapFile + " to " + fileName)
+	l := "converting file " + pcapFile + " to " + fileName
+	print(l)
+	logFile.WriteString(l)
+
 	datOut, err := os.Create(fileName)
 	if err != nil {
 		panic(err)
 	}
 	enc = json.NewEncoder(datOut)
 	symbolMetaData.Encoder = enc
-	// symbolToEncoder[symbol] = enc
 	return enc
 }
 
@@ -417,4 +442,14 @@ func convertToJSON(pcapFile string, destDir string, symbol string) {
 		}
 	}
 
+}
+
+//Contains tests if string x is in the array a of strings
+func Contains(a []string, x string) bool {
+	for _, n := range a {
+		if x == n {
+			return true
+		}
+	}
+	return false
 }
