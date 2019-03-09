@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -26,6 +27,7 @@ type SymbolMetaData struct {
 	BulkCount         int
 	BulkMessageCount  int
 	TotalMessageCount int
+	LastPriceChanged  bool
 	Encoder           *json.Encoder
 	LastPrice         *tops.TradeReportMessage
 	LastOrderBook     *tops.QuoteUpdateMessage
@@ -44,6 +46,8 @@ type EnrichedTOPS struct {
 	LastSalePrice float64 `json:"lsp"`
 	// Timestamp of the last sale
 	LastSaleTimestamp time.Time `json:"lst"`
+	// First TOP after a new sale
+	LastSaleChange bool `json:"ls"`
 	// Size of the quote at the bid, in number of shares.
 	BidSize uint32 `json:"bs"`
 	// Price of the quote at the bid.
@@ -66,7 +70,7 @@ type ActionMetaData struct {
 }
 
 // logfile
-var logFile *os.File
+var logger *log.Logger
 
 func main() {
 	if len(os.Args) < 2 {
@@ -85,11 +89,13 @@ func main() {
 	flag.Parse()
 
 	logfileName := "pcaplog-" + time.Now().Format("20060102") + ".log"
-	l, err := os.OpenFile(logfileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(logfileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(err)
 	}
-	logFile = l
+	mw := io.MultiWriter(os.Stdout, logFile)
+	logger = log.New(mw, "", log.LstdFlags)
+	log.SetOutput(mw)
 
 	fileOrDirectory := flag.Args()[0]
 	fi, err := os.Lstat(fileOrDirectory)
@@ -153,13 +159,13 @@ func main() {
 			panic(err)
 		}
 		for index := 0; index < len(names); index++ {
-			// if strings.HasSuffix(names[index], "pcap") ||
-			// 	strings.HasSuffix(names[index], "pcap.gz") {
-			if strings.Contains(names[index], "pcap") ||
-				strings.Contains(names[index], "pcap.gz") {
-				if len(*filterPtr) > 0 && (strings.Index(names[index], *filterPtr) > -1) || len(*filterPtr) == 0 {
-					convertToMergedJSON(fileOrDirectory+names[index], destDir, symbols)
-					// println("convert" + fileOrDirectory + names[index])
+			subFileName := names[index]
+			subFile, subFileErr := os.Lstat(fileOrDirectory + subFileName)
+			if subFileErr != nil || subFile.Mode().IsRegular() == false {
+				logger.Printf("cannot open or is not a file %v", subFileName)
+			} else if strings.Contains(subFileName, "pcap") || strings.Contains(subFileName, "pcap.gz") { //strings.HasSuffix(names[index], "pcap") || strings.HasSuffix(names[index], "pcap.gz")
+				if len(*filterPtr) > 0 && (strings.Index(subFileName, *filterPtr) > -1) || len(*filterPtr) == 0 {
+					convertToMergedJSON(fileOrDirectory+subFileName, destDir, symbols)
 				}
 
 			}
@@ -169,9 +175,7 @@ func main() {
 		symbolMetaData, found := symbolMetaDataMap[sym]
 		if found {
 			symbolMetaData = symbolMetaDataMap[sym]
-			l := fmt.Sprintf("finished %v %v\n", sym, symbolMetaData.TotalMessageCount)
-			print(l)
-			logFile.WriteString(l)
+			logger.Printf("finished %v %v\n", sym, symbolMetaData.TotalMessageCount)
 		}
 	}
 	return
@@ -181,12 +185,10 @@ var dateRegexp = regexp.MustCompile("[\\d]{8}")
 var errorRegExp = regexp.MustCompile("errors\"\\s*:\\s*true")
 
 func upload(url string, username string, password string, indexPrefix string, fileName string) {
-	var l string
+
 	file, err := os.Open(fileName)
 	if err != nil {
-		l = fmt.Sprintf("cannot open %v: %v\n", fileName, err)
-		print(l)
-		logFile.WriteString(l)
+		logger.Printf("cannot open %v: %v", fileName, err)
 		return
 	}
 	payloadReader := bufio.NewReader(file)
@@ -200,14 +202,15 @@ func upload(url string, username string, password string, indexPrefix string, fi
 		url = url + "/"
 	}
 	url = url + indexPrefix + "-" + symbol + "-" + date + "/_bulk"
-	l = fmt.Sprintf("uploading to %v\n", url)
-	print(l)
-	logFile.WriteString(l)
+
+	lastPS := strings.LastIndex(fileName, string(os.PathSeparator))
+	pcapIndex := strings.Index(fileName, ".ndjson")
+	fileNameOnly := fileName[lastPS+1 : pcapIndex]
+	logger.Printf("uploading %v %v\n", fileNameOnly, url)
+
 	req, err := http.NewRequest("POST", url, payloadReader)
 	if err != nil {
-		l = fmt.Sprintf("cannot create request %v\n", err)
-		print(l)
-		logFile.WriteString(l)
+		logger.Printf("cannot create request %v\n", err)
 		return
 	}
 	req.SetBasicAuth(username, password)
@@ -215,29 +218,21 @@ func upload(url string, username string, password string, indexPrefix string, fi
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		l = fmt.Sprintf("cannot make request %v\n", err)
-		print(l)
-		logFile.WriteString(l)
+		logger.Printf("cannot make request %v\n", err)
 		return
 	}
 	defer res.Body.Close()
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		l = fmt.Sprintf("cannot read response %v\n", err)
-		print(l)
-		logFile.WriteString(l)
+		logger.Printf("cannot read response %v\n", err)
 		return
 	}
-	l = fmt.Sprintf("uploaded %v\n", fileName)
-	print(l)
-	logFile.WriteString(l)
+	logger.Printf("uploaded %v\n", fileNameOnly)
 	responseJSON := string(body)
 	error := errorRegExp.FindString(responseJSON)
 	if len(error) > 0 {
 		responseFileName := fileName + ".error.json"
-		l = fmt.Sprintf("error while uploading. writing response to  " + responseFileName)
-		print(l)
-		logFile.WriteString(l)
+		logger.Printf("error while uploading. writing response to  " + responseFileName)
 		datOut, err := os.Create(responseFileName)
 		if err != nil {
 			fmt.Printf("cannot write response to file ")
@@ -249,7 +244,7 @@ func upload(url string, username string, password string, indexPrefix string, fi
 		responseFileName := fileName + ".response.json"
 		datOut, err := os.Create(responseFileName)
 		if err != nil {
-			fmt.Printf("cannot write response to file ")
+			logger.Printf("cannot write response to file %v ", responseFileName)
 			return
 		}
 		datOut.WriteString("{\"result\":\"uploaded successfully\"}")
@@ -285,10 +280,10 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 		msg, err := pcapScanner.NextMessage()
 		if err != nil {
 			if err == io.EOF {
-				fmt.Printf("io.EOF %v\n", err)
+				logger.Printf("io.EOF %v\n", err)
 				break
 			}
-			fmt.Printf("cannot read next message: %v\n", err)
+			logger.Printf("cannot read next message: %v\n", err)
 			break
 		}
 
@@ -300,17 +295,23 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 				symbolMetaData := symbolMetaDataMap[symbol]
 				symbolMetaData.LastOrderBook = msg
 				topMessage := EnrichedTOPS{Timestamp: msg.Timestamp,
-					Symbol:   msg.Symbol,
-					AskPrice: msg.AskPrice,
-					AskSize:  msg.AskSize,
-					BidPrice: msg.BidPrice,
-					BidSize:  msg.BidSize}
+					Symbol:         msg.Symbol,
+					AskPrice:       msg.AskPrice,
+					AskSize:        msg.AskSize,
+					BidPrice:       msg.BidPrice,
+					BidSize:        msg.BidSize,
+					LastSaleChange: false}
 
 				lastPriceMsg := symbolMetaData.LastPrice
+
 				if lastPriceMsg != nil {
 					topMessage.LastSalePrice = lastPriceMsg.Price
 					topMessage.LastSaleSize = lastPriceMsg.Size
 					topMessage.LastSaleTimestamp = lastPriceMsg.Timestamp
+					if symbolMetaData.LastPriceChanged {
+						topMessage.LastSaleChange = true
+						symbolMetaData.LastPriceChanged = false
+					}
 				}
 				enc := jsonEncoder(pcapFile, destDir, symbol)
 				indexMetaData := IndexMetaData{
@@ -327,7 +328,7 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 					fmt.Printf("%v %v\n", symbol, totalCounter)
 				}
 				if bulkMsgCounter >= maxBulkSize {
-					fmt.Printf("%v reaching bulk size\n", symbol)
+					logger.Printf("%v reaching bulk size\n", symbol)
 					symbolMetaData.BulkMessageCount = 0
 					symbolMetaData.Encoder = nil
 					symbolMetaData.BulkCount++
@@ -341,6 +342,7 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 				// symbolToLastPrice[symbol] = msg
 				symbolMetaData := symbolMetaDataMap[symbol]
 				symbolMetaData.LastPrice = msg
+				symbolMetaData.LastPriceChanged = true
 			}
 		default:
 		}
@@ -372,9 +374,7 @@ func jsonEncoder(pcapFile string, destDir string, symbol string) *json.Encoder {
 	} else {
 		fileName = destDir + fileName + ".ndjson"
 	}
-	l := "converting file " + pcapFile + " to " + fileName
-	print(l)
-	logFile.WriteString(l)
+	logger.Print("converting file " + pcapFile + " to " + fileName)
 
 	datOut, err := os.Create(fileName)
 	if err != nil {
