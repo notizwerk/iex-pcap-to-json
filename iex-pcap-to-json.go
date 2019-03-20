@@ -260,10 +260,15 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 				BulkCount: 0}
 			symbolMetaDataMap[sym] = symbolMetaData
 		}
+		// for a new pcap file, setting enc to nil will create a new json file(see jsonEncoder(...))
 		if symbolMetaData.Encoder != nil {
+			// logger.Printf("%v cleaning symbol meta data \n", sym)
 			symbolMetaData.Encoder = nil
 			symbolMetaData.BulkMessageCount = 0
 			symbolMetaData.BulkCount = 0
+			// the files are split by day. With a new day there is no "last price"
+			symbolMetaData.LastPrice = nil
+			symbolMetaData.LastPriceChanged = false
 		}
 	}
 
@@ -305,6 +310,7 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 				lastPriceMsg := symbolMetaData.LastPrice
 
 				if lastPriceMsg != nil {
+					// logger.Printf("%v using last price %v\n", symbol,lastPriceMsg.Price)
 					topMessage.LastSalePrice = lastPriceMsg.Price
 					topMessage.LastSaleSize = lastPriceMsg.Size
 					topMessage.LastSaleTimestamp = lastPriceMsg.Timestamp

@@ -9,8 +9,8 @@ The IEX is a fair, simple and transparent stock exchange dedicated to investor p
 ## usage
 * clone the project
 * go build
-* .\iex-pcap-to-json.exe folder/with/pcap/iex/files destination/dir
+* .\iex-pcap-to-json.exe -filter=201801 -symbol=AAPL folder/with/pcap/iex/files destination/dir
 * or
 * .\iex-pcap-to-json.exe IEX_tops.pcap destination/dir
 
-the destination dir is optional
+the filter, symbol and destination dir is optional
