@@ -37,25 +37,25 @@ var symbolMetaDataMap = make(map[string]*SymbolMetaData)
 
 // EnrichedTOPS containing all relevant data in one doc
 type EnrichedTOPS struct {
-	Timestamp time.Time `json:"t"`
+	Timestamp *time.Time `json:"t"`
 	// Traded symbol represented in Nasdaq integrated symbology.
 	Symbol string `json:"s"`
 	// Size of the last trade, in number of shares.
-	LastSaleSize uint32 `json:"lss"`
+	LastSaleSize uint32 `json:"lss,omitempty"`
 	// Execution price of last sale.
-	LastSalePrice float64 `json:"lsp"`
+	LastSalePrice float64 `json:"lsp,omitempty"`
 	// Timestamp of the last sale
-	LastSaleTimestamp time.Time `json:"lst"`
+	LastSaleTimestamp *time.Time `json:"lst,omitempty"`
 	// First TOP after a new sale
 	LastSaleChange bool `json:"ls"`
 	// Size of the quote at the bid, in number of shares.
-	BidSize uint32 `json:"bs"`
+	BidSize uint32 `json:"bs,omitempty"`
 	// Price of the quote at the bid.
-	BidPrice float64 `json:"bp"`
+	BidPrice float64 `json:"bp,omitempty"`
 	// Price of the quote at the ask.
-	AskPrice float64 `json:"ap"`
+	AskPrice float64 `json:"ap,omitempty"`
 	// Size of the quote at the ask, in number of shares.
-	AskSize uint32 `json:"as"`
+	AskSize uint32 `json:"as,omitempty"`
 }
 
 // IndexMetaData for generating the bulk meta data part
@@ -295,11 +295,11 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 		switch msg := msg.(type) {
 		case *tops.QuoteUpdateMessage:
 			symbol := msg.Symbol
-			if len(symbols) > 0 && Contains(symbols, symbol) {
+			if len(symbols) > 0 && Contains(symbols, symbol) && (msg.AskSize > 0 || msg.BidSize > 0) {
 
 				symbolMetaData := symbolMetaDataMap[symbol]
 				symbolMetaData.LastOrderBook = msg
-				topMessage := EnrichedTOPS{Timestamp: msg.Timestamp,
+				topMessage := EnrichedTOPS{Timestamp: &(msg.Timestamp),
 					Symbol:         msg.Symbol,
 					AskPrice:       msg.AskPrice,
 					AskSize:        msg.AskSize,
@@ -313,11 +313,13 @@ func convertToMergedJSON(pcapFile string, destDir string, symbols []string) {
 					// logger.Printf("%v using last price %v\n", symbol,lastPriceMsg.Price)
 					topMessage.LastSalePrice = lastPriceMsg.Price
 					topMessage.LastSaleSize = lastPriceMsg.Size
-					topMessage.LastSaleTimestamp = lastPriceMsg.Timestamp
+					topMessage.LastSaleTimestamp = &(lastPriceMsg.Timestamp)
 					if symbolMetaData.LastPriceChanged {
 						topMessage.LastSaleChange = true
 						symbolMetaData.LastPriceChanged = false
 					}
+				} else {
+					topMessage.LastSaleTimestamp = nil
 				}
 				enc := jsonEncoder(pcapFile, destDir, symbol)
 				indexMetaData := IndexMetaData{
